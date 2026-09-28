@@ -1,0 +1,28 @@
+# Build Artifacts
+*.o
+*.obj
+*.exe
+*.out
+*.elf
+*.bin
+*.hex
+*.d
+
+# Executables
+test_week1
+
+# Keil MDK Artifacts
+Objects/
+Listings/
+*.uvoptx
+*.uvguix.*
+*.bak
+*.dep
+*.map
+JLinkLog.txt
+
+# VS Code / IDEs
+.vscode/
+.idea/
+*.swp
+*~
