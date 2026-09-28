@@ -39,28 +39,21 @@ int16_t trop_karp_lambda(const TropMatrix *A)
     const uint8_t n = A->rows;
 
     /*
-     * State trajectories: D[k][u] is the maximum weight path of length k to node u.
-     * Dimensions: (MAX_DIM + 1) x MAX_DIM of int16_t
-     * Memory consumption: 17 * 16 * 2 = 544 bytes on stack.
+     * State trajectories: D[k] is the state vector (n x 1 matrix) after k events/steps.
+     * Memory consumption: 17 * sizeof(TropMatrix) on stack.
      */
-    int16_t D[MAX_DIM + 1][MAX_DIM];
+    TropMatrix D[MAX_DIM + 1];
 
-    /* Step 1: Initialize D_0 = [0, TROP_ZERO, ..., TROP_ZERO]^T */
-    D[0][0] = TROP_ONE; /* 0 */
-    for (uint8_t u = 1; u < n; ++u) {
-        D[0][u] = TROP_ZERO;
-    }
+    /* Step 1: Initialize D_0 = [0, TROP_ZERO, ..., TROP_ZERO]^T as an (n x 1) vector */
+    trop_matrix_init(&D[0], n, 1);
+    D[0].data[0][0] = TROP_ONE; /* 0 */
 
-    /* Step 2: Iteratively compute D_k = A (x) D_{k-1} for k = 1 to n */
+    /*
+     * Step 2: Compute D_k = A (x) D_{k-1} using trop_matmul
+     * Since A is (n x n) and D_{k-1} is (n x 1), the product is (n x 1).
+     */
     for (uint8_t k = 1; k <= n; ++k) {
-        for (uint8_t i = 0; i < n; ++i) {
-            int16_t max_val = TROP_ZERO;
-            for (uint8_t j = 0; j < n; ++j) {
-                int16_t term = trop_mul(A->data[i][j], D[k - 1][j]);
-                max_val = trop_add(max_val, term);
-            }
-            D[k][i] = max_val;
-        }
+        trop_matmul(A, &D[k - 1], &D[k]);
     }
 
     /*
@@ -75,7 +68,7 @@ int16_t trop_karp_lambda(const TropMatrix *A)
 
     for (uint8_t u = 0; u < n; ++u) {
         /* Node must be reachable at step n */
-        if (D[n][u] <= TROP_ZERO) {
+        if (D[n].data[u][0] <= TROP_ZERO) {
             continue;
         }
 
@@ -85,11 +78,11 @@ int16_t trop_karp_lambda(const TropMatrix *A)
 
         for (uint8_t k = 0; k < n; ++k) {
             /* Node must be reachable at step k */
-            if (D[k][u] <= TROP_ZERO) {
+            if (D[k].data[u][0] <= TROP_ZERO) {
                 continue;
             }
 
-            int32_t diff = (int32_t)D[n][u] - (int32_t)D[k][u];
+            int32_t diff = (int32_t)D[n].data[u][0] - (int32_t)D[k].data[u][0];
             int32_t den  = (int32_t)n - (int32_t)k; /* Always > 0 since k < n */
 
             if (!has_valid_k) {
