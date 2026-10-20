@@ -8,10 +8,12 @@
  * Validates:
  * 1. Matrix multiplication and power in (max, +) semiring.
  * 2. Karp's algorithm host validation (step-by-step state vector D_k recursion).
- * 3. Exact rational lambda evaluation (3/1 and fractional 7/2).
- * 4. Kleene Star metric closure and dependency elimination.
- * 5. Rejection of illegal positive cycles in Kleene Star (causality check).
- * 6. Overflow saturation in scalar tropical multiplication.
+ * 3. Exact rational lambda evaluation (3/1, 3/2, 5/1, and fractional 7/2).
+ * 4. Bound check against arithmetic overflow (TROP_ERR_OVERFLOW).
+ * 5. Reachability enforcement across graph components (TROP_ERR_NOT_REACHABLE).
+ * 6. Kleene Star metric closure and dependency elimination.
+ * 7. Rejection of illegal positive cycles in Kleene Star (causality check).
+ * 8. Overflow saturation in scalar tropical multiplication.
  */
 
 #include <stdio.h>
@@ -160,28 +162,86 @@ int main(void)
     printf("[PASS] Karp's integer eigenvalue assertion (lambda == 3/1) SUCCESSFUL!\n\n");
 
     /*
-     * 4. Validation of Fractional Lambda (Prevents Integer Truncation Loss)
+     * 4. Validation of Rational Lambda Precision (3/2, 5/1, and 7/2)
      */
     printf("===============================================================\n");
-    printf("  Fractional Eigenvalue Precision Verification                 \n");
+    printf("  Rational Eigenvalue Precision Verification                   \n");
     printf("===============================================================\n\n");
 
+    /* 4a. 2-cycle with weights 1 and 2: lambda = 3/2 */
+    TropMatrix A_3_2;
+    trop_matrix_init(&A_3_2, 2, 2);
+    A_3_2.data[0][0] = TROP_ZERO; A_3_2.data[0][1] = 1;
+    A_3_2.data[1][0] = 2;         A_3_2.data[1][1] = TROP_ZERO;
+    int32_t num_3_2 = 0, den_3_2 = 1;
+    int8_t st_3_2 = trop_karp_lambda(&A_3_2, &num_3_2, &den_3_2);
+    assert(st_3_2 == TROP_SUCCESS);
+    assert(num_3_2 == 3 && den_3_2 == 2);
+    printf("[PASS] 2-cycle (weights 1, 2) verified: lambda = %d/%d (1.50)\n", num_3_2, den_3_2);
+
+    /* 4b. Self-loop of 5: lambda = 5/1 */
+    TropMatrix A_loop5;
+    trop_matrix_init(&A_loop5, 1, 1);
+    A_loop5.data[0][0] = 5;
+    int32_t num_5 = 0, den_5 = 1;
+    int8_t st_5 = trop_karp_lambda(&A_loop5, &num_5, &den_5);
+    assert(st_5 == TROP_SUCCESS);
+    assert(num_5 == 5 && den_5 == 1);
+    printf("[PASS] Self-loop of 5 verified: lambda = %d/%d (5.00)\n", num_5, den_5);
+
+    /* 4c. 2-cycle with weights 5 and 2: lambda = 7/2 */
     TropMatrix A_frac;
     trop_matrix_init(&A_frac, 2, 2);
-    /* 2-cycle with weights 5 and 2: total weight 7, cycle length 2 -> lambda = 7/2 = 3.5 */
     A_frac.data[0][0] = TROP_ZERO; A_frac.data[0][1] = 5;
     A_frac.data[1][0] = 2;         A_frac.data[1][1] = TROP_ZERO;
-
     int32_t f_num = 0, f_den = 1;
     int8_t f_status = trop_karp_lambda(&A_frac, &f_num, &f_den);
-    printf("Fractional pipeline matrix lambda returned: %d/%d (float: %.2f, status: %d)\n",
-           f_num, f_den, (float)f_num / (float)f_den, f_status);
     assert(f_status == TROP_SUCCESS);
     assert(f_num == 7 && f_den == 2);
-    printf("[PASS] Fractional eigenvalue preserved exactly without integer truncation!\n\n");
+    printf("[PASS] Fractional pipeline matrix verified: lambda = %d/%d (3.50)\n\n", f_num, f_den);
 
     /*
-     * 5. Verify Kleene Star Closure and Dependency Elimination
+     * 5. Validation of Arithmetic Overflow Bound Check (TROP_ERR_OVERFLOW)
+     */
+    printf("===============================================================\n");
+    printf("  Karp Overflow Bound Enforcement (TROP_ERR_OVERFLOW)          \n");
+    printf("===============================================================\n\n");
+
+    /* 2-cycle with weights 30000 and 30000: n * w_max = 2 * 30000 = 60000 > 30000 */
+    TropMatrix A_ovf;
+    trop_matrix_init(&A_ovf, 2, 2);
+    A_ovf.data[0][0] = TROP_ZERO; A_ovf.data[0][1] = 30000;
+    A_ovf.data[1][0] = 30000;     A_ovf.data[1][1] = TROP_ZERO;
+
+    int32_t ovf_num = 0, ovf_den = 1;
+    int8_t ovf_status = trop_karp_lambda(&A_ovf, &ovf_num, &ovf_den);
+    printf("Karp on weights 30000 returned status: %d (expected TROP_ERR_OVERFLOW = %d)\n",
+           ovf_status, TROP_ERR_OVERFLOW);
+    assert(ovf_status == TROP_ERR_OVERFLOW);
+    printf("[PASS] Overflow bound successfully trapped; prevents silent inaccurate saturation!\n\n");
+
+    /*
+     * 6. Validation of Reachability Enforcement (TROP_ERR_NOT_REACHABLE)
+     */
+    printf("===============================================================\n");
+    printf("  Karp Reachability Enforcement (TROP_ERR_NOT_REACHABLE)       \n");
+    printf("===============================================================\n\n");
+
+    /* Disconnected graph: node 0 self-loop 1, node 1 self-loop 9 (unreachable from node 0) */
+    TropMatrix A_disconn;
+    trop_matrix_init(&A_disconn, 2, 2);
+    A_disconn.data[0][0] = 1;         A_disconn.data[0][1] = TROP_ZERO;
+    A_disconn.data[1][0] = TROP_ZERO; A_disconn.data[1][1] = 9;
+
+    int32_t reach_num = 0, reach_den = 1;
+    int8_t reach_status = trop_karp_lambda(&A_disconn, &reach_num, &reach_den);
+    printf("Karp on disconnected graph returned status: %d (expected TROP_ERR_NOT_REACHABLE = %d)\n",
+           reach_status, TROP_ERR_NOT_REACHABLE);
+    assert(reach_status == TROP_ERR_NOT_REACHABLE);
+    printf("[PASS] Unreachable component successfully detected and flagged!\n\n");
+
+    /*
+     * 7. Verify Kleene Star Closure and Dependency Elimination
      */
     printf("===============================================================\n");
     printf("  Kleene Star Closure & Discrete Event Dependency Elimination \n");
@@ -208,7 +268,7 @@ int main(void)
     printf("[PASS] Dependency elimination (Kleene Star) verified.\n\n");
 
     /*
-     * 6. Positive Cycle Detection in Kleene Star (Causality Check)
+     * 8. Positive Cycle Detection in Kleene Star (Causality Check)
      */
     printf("===============================================================\n");
     printf("  Kleene Star Positive Cycle Rejection (Causality Enforcement) \n");
@@ -231,7 +291,7 @@ int main(void)
     printf("[PASS] Positive cycle detected and successfully rejected by Kleene star!\n\n");
 
     /*
-     * 7. Scalar Multiplication Overflow Saturation Verification
+     * 9. Scalar Multiplication Overflow Saturation Verification
      */
     printf("===============================================================\n");
     printf("  Scalar Multiplication Saturation Protection                  \n");

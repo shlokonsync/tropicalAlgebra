@@ -21,15 +21,17 @@
  * - \f$ D_0 = [0, \varepsilon, \dots, \varepsilon]^T \f$ is the initial state vector.
  * - \f$ D_k = A \otimes D_{k-1} \f$ for \f$ 1 \le k \le n \f$.
  *
- * Preconditions:
- * --------------
- * Matrix @c A must be irreducible (strongly connected precedence graph).
- * When running from initial node 0, all cycles must be reachable from node 0.
+ * Preconditions & Runtime Verification:
+ * -------------------------------------
+ * 1. Range safety: Bounded by n * w_max <= TROP_WEIGHT_BOUND (30000). Returns
+ *    TROP_ERR_OVERFLOW if exceeded, warning that the timing scale is too fine.
+ * 2. Reachability: Every node u must be reachable from node 0 (D[k][u] > TROP_ZERO
+ *    for some k <= n). Returns TROP_ERR_NOT_REACHABLE if disconnected components exist.
  *
  * Embedded Safety:
  * ----------------
- * - Zero dynamic memory: state vectors D[k] are stored in a file-scope static 2D array
- *   (544 bytes in .bss). Stack footprint is under 48 bytes (safe for 1 KB Keil stack).
+ * - Zero dynamic memory: state vectors s_karp_D are stored in file-scope static array
+ *   (544 bytes in .bss). Stack footprint is under 96 bytes (safe for 1 KB Keil stack).
  * - Non-reentrant: Do not call concurrently or from an ISR.
  * - Exact rational arithmetic: All comparisons cross-multiply integer ratios to avoid
  *   floating-point or integer division rounding loss. Returns the exact reduced fraction.
@@ -42,11 +44,11 @@
 /* ========================================================================== */
 
 /*
- * State trajectories: D[k][u] is the state value of node u after k steps.
+ * State trajectories: s_karp_D[k][u] is the state value of node u after k steps.
  * Storing only 1D vectors consumes (17 * 16 * 2) = 544 bytes in .bss,
  * eliminating the 8.8 KB stack allocation of 17 full TropMatrix structs.
  */
-static int16_t D[MAX_DIM + 1][MAX_DIM];
+static int16_t s_karp_D[MAX_DIM + 1][MAX_DIM];
 
 /* ========================================================================== */
 /*                           HELPER FUNCTIONS                                 */
@@ -71,6 +73,36 @@ static int32_t calc_gcd(int32_t a, int32_t b)
     return (a == 0) ? 1 : a;
 }
 
+/**
+ * @brief Max-Plus Matrix-Vector Product: out = A (x) in
+ *
+ * @details Computes out[i] = max_{0 <= j < n} (A[i][j] + in[j]).
+ * Encapsulated as a dedicated helper to allow future drop-in acceleration
+ * with ARM Cortex-M4 SIMD kernels (e.g. __SADD16 / __QADD16).
+ *
+ * @param[in]  A   Precedence matrix (n x n).
+ * @param[in]  in  Input state vector (length n).
+ * @param[out] out Output state vector (length n).
+ * @param[in]  n   Active dimension.
+ */
+static void trop_matvec_mul(const TropMatrix *A, const int16_t in[MAX_DIM], int16_t out[MAX_DIM], uint8_t n)
+{
+#if defined(TROP_CUSTOM_SIMD_MATVEC)
+    /* Hook for custom ARM Cortex-M4 SIMD kernel (e.g. Ansh's __SADD16 / __QADD16) */
+    extern void trop_simd_matvec(const TropMatrix *A, const int16_t in[MAX_DIM], int16_t out[MAX_DIM], uint8_t n);
+    trop_simd_matvec(A, in, out, n);
+#else
+    for (uint8_t i = 0; i < n; ++i) {
+        int16_t acc = TROP_ZERO;
+        for (uint8_t j = 0; j < n; ++j) {
+            int16_t term = trop_mul(A->data[i][j], in[j]);
+            acc = trop_add(acc, term);
+        }
+        out[i] = acc;
+    }
+#endif
+}
+
 /* ========================================================================== */
 /*                         ALGORITHM IMPLEMENTATION                           */
 /* ========================================================================== */
@@ -88,27 +120,60 @@ int8_t trop_karp_lambda(const TropMatrix *A, int32_t *lambda_num, int32_t *lambd
     const uint8_t n = A->rows;
 
     /*
-     * Step 1: Initialize D_0 = [0, \varepsilon, \dots, \varepsilon]^T
-     * Node 0 is the designated source vertex. (Requires A to be irreducible).
+     * Bound check against arithmetic overflow:
+     * D_k cannot exceed k * w_max. In an n-node graph, the maximum path weight
+     * is bounded by n * w_max. If n * w_max > TROP_WEIGHT_BOUND (30000),
+     * intermediate additions risk overflow/saturation, signaling that the
+     * time unit (scale) is too fine.
      */
-    D[0][0] = TROP_ONE; /* 0 */
+    int16_t w_max = TROP_ZERO;
+    for (uint8_t i = 0; i < n; ++i) {
+        for (uint8_t j = 0; j < n; ++j) {
+            if ((A->data[i][j] > TROP_ZERO) && (A->data[i][j] > w_max)) {
+                w_max = A->data[i][j];
+            }
+        }
+    }
+
+    if (w_max > 0) {
+        if (((int32_t)w_max * (int32_t)n) > TROP_WEIGHT_BOUND) {
+            return TROP_ERR_OVERFLOW;
+        }
+    }
+
+    /*
+     * Step 1: Initialize D_0 = [0, \varepsilon, \dots, \varepsilon]^T
+     * Node 0 is the designated source vertex.
+     */
+    s_karp_D[0][0] = TROP_ONE; /* 0 */
     for (uint8_t u = 1; u < n; ++u) {
-        D[0][u] = TROP_ZERO;
+        s_karp_D[0][u] = TROP_ZERO;
     }
 
     /*
      * Step 2: Compute D_k = A (x) D_{k-1} for k = 1 ... n
-     * Direct matrix-vector max-plus product avoids calling trop_matmul with
-     * large matrix wrappers on the stack.
      */
     for (uint8_t k = 1; k <= n; ++k) {
-        for (uint8_t i = 0; i < n; ++i) {
-            int16_t acc = TROP_ZERO;
-            for (uint8_t j = 0; j < n; ++j) {
-                int16_t term = trop_mul(A->data[i][j], D[k - 1][j]);
-                acc = trop_add(acc, term);
+        trop_matvec_mul(A, s_karp_D[k - 1], s_karp_D[k], n);
+    }
+
+    /*
+     * Step 2b: Reachability check
+     * In an irreducible graph (or a graph where all nodes are reachable from node 0),
+     * every node u must be reached at least once during steps 0 ... n.
+     * If any node u has D[k][u] <= TROP_ZERO for all k <= n, then node u is unreachable
+     * from node 0, meaning cycles in u's component would be silently ignored.
+     */
+    for (uint8_t u = 0; u < n; ++u) {
+        uint8_t reachable = 0;
+        for (uint8_t k = 0; k <= n; ++k) {
+            if (s_karp_D[k][u] > TROP_ZERO) {
+                reachable = 1;
+                break;
             }
-            D[k][i] = acc;
+        }
+        if (!reachable) {
+            return TROP_ERR_NOT_REACHABLE;
         }
     }
 
@@ -123,7 +188,7 @@ int8_t trop_karp_lambda(const TropMatrix *A, int32_t *lambda_num, int32_t *lambd
 
     for (uint8_t u = 0; u < n; ++u) {
         /* Node u must be reachable at step n */
-        if (D[n][u] <= TROP_ZERO) {
+        if (s_karp_D[n][u] <= TROP_ZERO) {
             continue;
         }
 
@@ -133,11 +198,11 @@ int8_t trop_karp_lambda(const TropMatrix *A, int32_t *lambda_num, int32_t *lambd
 
         for (uint8_t k = 0; k < n; ++k) {
             /* Node u must be reachable at step k */
-            if (D[k][u] <= TROP_ZERO) {
+            if (s_karp_D[k][u] <= TROP_ZERO) {
                 continue;
             }
 
-            int32_t diff = (int32_t)D[n][u] - (int32_t)D[k][u];
+            int32_t diff = (int32_t)s_karp_D[n][u] - (int32_t)s_karp_D[k][u];
             int32_t den  = (int32_t)n - (int32_t)k; /* Always > 0 since k < n */
 
             if (!has_valid_k) {

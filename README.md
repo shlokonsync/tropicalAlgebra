@@ -25,27 +25,29 @@ The $(\max, +)$ tropical semiring is denoted by $\mathbb{R}_{\max} = (\mathbb{R}
 4. **Kleene Star Closure ($A^*$) with Positive Cycle Detection:**
    $$A^* = \bigoplus_{k=0}^{n-1} A^{\otimes k} = I \oplus A \oplus A^{\otimes 2} \oplus \dots \oplus A^{\otimes (n-1)}$$
    - **Precondition & Causality:** The closure exists if and only if $A$ contains no cycles with positive weight ($\lambda(A) \le 0$).
-   - If any power $A^k$ ($1 \le k \le n$) has a positive diagonal entry $(A^k)_{i,i} > 0$, the closure diverges. The library halts and returns `TROP_ERR_POSITIVE_CYCLE`.
+   - If any power $A^k$ ($1 \le k \le n$) has a positive diagonal entry $(A^k)_{i,i} > 0$, the closure diverges. The library halts and returns `TROP_ERR_POSITIVE_CYCLE` (`-4`).
    - Resolves implicit discrete event system dependencies: $x(k) = A_0 x(k) \oplus A_1 x(k-1) \implies x(k) = (A_0^* A_1) x(k-1)$.
 
 5. **Spectral Analysis (Karp's Maximum Cycle Mean Algorithm):**
    $$\lambda(A) = \max_{u \in V} \min_{0 \le k \le n-1} \frac{D_n(u) - D_k(u)}{n - k}$$
    where $D_k = A \otimes D_{k-1}$ and $D_0 = [0, \varepsilon, \dots, \varepsilon]^T$.
    - **Exact Rational Output:** Returns exact reduced fraction $\lambda = \frac{p}{q}$ (`lambda_num / lambda_den`) without integer truncation loss.
-   - **Precondition:** Matrix $A$ must be irreducible (Timed Event Graph strongly connected), ensuring all cycles are reachable from the initial state vector.
+   - **Overflow Bound Check:** Evaluates $n \cdot w_{\max}$. If $n \cdot w_{\max} > 30,000$ (`TROP_WEIGHT_BOUND`), halts and returns `TROP_ERR_OVERFLOW` (`-5`), preventing inaccurate saturation and signaling that the timing unit is too fine.
+   - **Reachability Enforcement:** Verifies that every state $u$ is reachable from the reference node ($D_k(u) > \varepsilon$ for some $k \le n$). Returns `TROP_ERR_NOT_REACHABLE` (`-6`) if disconnected components are present.
 
 ---
 
 ## ⚡ Embedded Constraints & Memory Architecture
 
 - **Zero Dynamic Memory Allocation:** No `malloc`, `calloc`, or `free`.
-- **Minimal Stack Footprint (< 160 Bytes):** Large temporary matrices and vector trajectories are stored in file-scope static `.bss` buffers ($544\text{ B}$ for Karp vectors, $514\text{ B}$ per matrix scratchpad). This guarantees complete stack safety on default Keil MDK / CMSIS $1\text{ KB}$ startup stacks (worst-case call stack $\le 272\text{ bytes}$).
+- **Minimal Stack Footprint (< 96 Bytes on ARM Cortex-M4):** State trajectories `s_karp_D` ($544\text{ B}$) and temporary matrices are allocated as file-scope static variables in `.bss`. This guarantees safety on default $1\text{ KB}$ Keil MDK / CMSIS stacks.
 - **Concurrency & Non-Reentrancy:** Because file-scope static scratchpads are used, functions are **non-reentrant**. They are safe for single-threaded bare-metal main loop execution, but **must not be called from Interrupt Service Routines (ISRs)**.
 - **Timing Units & Dynamic Range:**
   - With `int16_t`, $32,767\text{ cycles}$ at $168\text{ MHz}$ is only $\approx 195\ \mu\text{s}$.
-  - For pipeline modeling with $n \le 16$, edge weights must satisfy $w \times n < 32,000$.
+  - For pipeline modeling with $n \le 16$, edge weights must satisfy $w \times n < 30,000$.
   - **Recommended Time Base:** Scale pipeline timings to $10\ \mu\text{s}$ ticks ($32,767\text{ ticks} \approx 327.67\text{ ms}$) or $1\ \mu\text{s}$ ticks, ensuring safe headroom for Cortex-M4 SIMD (`__QADD16`/`__SADD16`).
-- **Strict ANSI C99:** Fully compatible with `-Wall -Wextra -Wpedantic -Werror -std=c99` and Keil MDK Arm Compiler 6 (`armclang`).
+- **SIMD Extension Point:** The max-plus matrix-vector product in Karp's algorithm is encapsulated in `trop_matvec_mul`, providing an explicit hook for custom ARM Cortex-M4 SIMD kernels.
+- **Strict ANSI C99:** Fully compatible with `-Wall -Wextra -Wpedantic -Wconversion -Werror -std=c99` and Keil MDK Arm Compiler 6 (`armclang`).
 - **Zero Standard I/O in Core:** Core modules (`tropical.h`, `tropical.c`, `karp.c`) contain zero `printf` or standard library dependencies.
 
 ---
@@ -56,9 +58,9 @@ The $(\max, +)$ tropical semiring is denoted by $\mathbb{R}_{\max} = (\mathbb{R}
 tropicalAlgebra/
 ├── tropical.h        # Core type definitions, error codes, and function prototypes
 ├── tropical.c        # Semiring scalar/matrix operations, powers, Kleene star
-├── karp.c            # Karp's algorithm with static vector buffers and exact rational lambda
-├── test_week1.c      # Verification suite (powers, rational lambda, positive cycle traps)
-├── Makefile          # Host build & test automation (-Wpedantic enabled)
+├── karp.c            # Karp's algorithm with s_karp_D, bound checking, and exact rational lambda
+├── test_week1.c      # Verification suite (powers, rational lambda, overflow/reachability traps)
+├── Makefile          # Host build & test automation (-Wpedantic and -Wconversion enabled)
 └── README.md         # Documentation & mathematical notes
 ```
 
@@ -68,8 +70,8 @@ tropicalAlgebra/
 
 ### Host (GCC / Linux / Windows MinGW)
 ```bash
-# Build the test harness with strict pedantic flags
-gcc -Wall -Wextra -Wpedantic -Werror -O2 -std=c99 tropical.c karp.c test_week1.c -o test_week1
+# Build the test harness with strict pedantic & conversion flags
+gcc -Wall -Wextra -Wpedantic -Wconversion -Werror -O2 -std=c99 tropical.c karp.c test_week1.c -o test_week1
 
 # Run the test suite
 ./test_week1
@@ -138,11 +140,26 @@ trop_karp_lambda(&A) returned: 3/1 (status: 0)
 [PASS] Karp's integer eigenvalue assertion (lambda == 3/1) SUCCESSFUL!
 
 ===============================================================
-  Fractional Eigenvalue Precision Verification                 
+  Rational Eigenvalue Precision Verification                   
 ===============================================================
 
-Fractional pipeline matrix lambda returned: 7/2 (float: 3.50, status: 0)
-[PASS] Fractional eigenvalue preserved exactly without integer truncation!
+[PASS] 2-cycle (weights 1, 2) verified: lambda = 3/2 (1.50)
+[PASS] Self-loop of 5 verified: lambda = 5/1 (5.00)
+[PASS] Fractional pipeline matrix verified: lambda = 7/2 (3.50)
+
+===============================================================
+  Karp Overflow Bound Enforcement (TROP_ERR_OVERFLOW)          
+===============================================================
+
+Karp on weights 30000 returned status: -5 (expected TROP_ERR_OVERFLOW = -5)
+[PASS] Overflow bound successfully trapped; prevents silent inaccurate saturation!
+
+===============================================================
+  Karp Reachability Enforcement (TROP_ERR_NOT_REACHABLE)       
+===============================================================
+
+Karp on disconnected graph returned status: -6 (expected TROP_ERR_NOT_REACHABLE = -6)
+[PASS] Unreachable component successfully detected and flagged!
 
 ===============================================================
   Kleene Star Closure & Discrete Event Dependency Elimination 

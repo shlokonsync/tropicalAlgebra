@@ -28,7 +28,7 @@
  * Memory Architecture:
  * - Zero dynamic memory allocation (no malloc/free).
  * - File-scope static scratch buffers (.bss) replace large local matrices, keeping stack
- *   consumption under 64 bytes per frame (fully safe for default 1 KB Keil MDK stacks).
+ *   consumption under 96 bytes per frame (fully safe for default 1 KB Keil MDK stacks).
  * - Non-reentrant: Designed for bare-metal main loop execution; DO NOT call from ISRs.
  * Core Dependencies: <stdint.h> only.
  */
@@ -51,6 +51,8 @@ extern "C" {
 #define TROP_ERR_INVALID_DIM       ((int8_t)-2)  /**< Dimension mismatch or exceeds MAX_DIM */
 #define TROP_ERR_NO_CYCLE          ((int8_t)-3)  /**< No valid cycle found in precedence graph */
 #define TROP_ERR_POSITIVE_CYCLE    ((int8_t)-4)  /**< Positive cycle detected (divergent Kleene star) */
+#define TROP_ERR_OVERFLOW          ((int8_t)-5)  /**< Theoretical cumulative weight exceeds dynamic range */
+#define TROP_ERR_NOT_REACHABLE     ((int8_t)-6)  /**< Graph not strongly connected / node unreachable from node 0 */
 
 /* ========================================================================== */
 /*                            CONSTANTS & CONFIG                              */
@@ -75,6 +77,12 @@ extern "C" {
  * @brief Tropical Multiplicative Identity (\f$ e = 0 \f$).
  */
 #define TROP_ONE  ((int16_t)0)
+
+/**
+ * @brief Safe upper bound on theoretical cumulative path weight (n * w_max).
+ * If (n * w_max) exceeds this threshold, trop_karp_lambda returns TROP_ERR_OVERFLOW.
+ */
+#define TROP_WEIGHT_BOUND 30000
 
 /**
  * @struct TropMatrix
@@ -234,24 +242,30 @@ int8_t trop_eliminate_dependencies(const TropMatrix *A0, const TropMatrix *A1, T
  * where \f$ D_k = A \otimes D_{k-1} \f$.
  *
  * Exact Rational Representation:
- * To avoid integer division truncation artifacts when comparing theoretical predictions
- * against measured hardware cycle counts, the result is returned as an exact reduced fraction
+ * The result is returned as an exact reduced fraction
  * \f$ \lambda = \frac{\text{lambda\_num}}{\text{lambda\_den}} \f$.
  *
- * Preconditions:
- * 1. Matrix @p A must be irreducible (i.e. the Timed Event Graph must be strongly connected),
- *    ensuring all cycles are reachable from the initial state vector (node 0).
- * 2. Intermediate weights must satisfy \f$ w \times n < 32,000 \f$ to avoid saturation.
+ * Runtime Enforcements:
+ * 1. Arithmetic Bound: Finds maximum finite weight w_max. If (n * w_max) > 30000,
+ *    returns TROP_ERR_OVERFLOW to signal that weights risk overflow/saturation and
+ *    the chosen time unit is too fine.
+ * 2. Reachability Enforcement: Verifies every node u is reachable from node 0
+ *    (has D[k][u] > TROP_ZERO for some k <= n). If any node is unreachable,
+ *    returns TROP_ERR_NOT_REACHABLE.
  *
  * Embedded Resource Safety:
- * - State vectors \f$ D_k \f$ are stored in a file-scope static 2D vector array (544 bytes in .bss).
- * - Stack consumption is under 48 bytes (safe for 1 KB Keil stack).
+ * - State vectors \f$ D_k \f$ are stored in a file-scope static 2D array s_karp_D (544 bytes in .bss).
+ * - Stack consumption is ~96 bytes (safe for 1 KB Keil stack).
  * - Non-reentrant: Do not call from ISR.
  *
  * @param[in]  A          Square adjacency/weight matrix of the Timed Event Graph (\f$ n \times n \f$).
  * @param[out] lambda_num Pointer to store the numerator of the exact cycle mean.
  * @param[out] lambda_den Pointer to store the denominator of the exact cycle mean.
- * @return TROP_SUCCESS on success, TROP_ERR_NO_CYCLE if no cycle reachable, or error code.
+ * @return TROP_SUCCESS on success,
+ *         TROP_ERR_OVERFLOW if n * w_max > 30000,
+ *         TROP_ERR_NOT_REACHABLE if any node is unreachable from node 0,
+ *         TROP_ERR_NO_CYCLE if no valid cycle exists,
+ *         or error code.
  */
 int8_t trop_karp_lambda(const TropMatrix *A, int32_t *lambda_num, int32_t *lambda_den);
 
