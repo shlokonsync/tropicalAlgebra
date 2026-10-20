@@ -21,54 +21,109 @@
  * - \f$ D_0 = [0, \varepsilon, \dots, \varepsilon]^T \f$ is the initial state vector.
  * - \f$ D_k = A \otimes D_{k-1} \f$ for \f$ 1 \le k \le n \f$.
  *
+ * Preconditions:
+ * --------------
+ * Matrix @c A must be irreducible (strongly connected precedence graph).
+ * When running from initial node 0, all cycles must be reachable from node 0.
+ *
  * Embedded Safety:
- * - Zero dynamic memory (all state vectors \f$ D_0 \dots D_n \f$ stored on stack).
- * - Exact rational comparison via cross-multiplication (\f$ \frac{a}{b} < \frac{c}{d} \iff a \cdot d < c \cdot b \f$)
- *   to avoid precision loss in embedded integer math.
- * - Strictly no standard library dependencies (<stdio.h>, <stdlib.h>, <assert.h>).
+ * ----------------
+ * - Zero dynamic memory: state vectors D[k] are stored in a file-scope static 2D array
+ *   (544 bytes in .bss). Stack footprint is under 48 bytes (safe for 1 KB Keil stack).
+ * - Non-reentrant: Do not call concurrently or from an ISR.
+ * - Exact rational arithmetic: All comparisons cross-multiply integer ratios to avoid
+ *   floating-point or integer division rounding loss. Returns the exact reduced fraction.
  */
 
 #include "tropical.h"
 
-int16_t trop_karp_lambda(const TropMatrix *A)
+/* ========================================================================== */
+/*                         STATIC VECTOR BUFFERS                              */
+/* ========================================================================== */
+
+/*
+ * State trajectories: D[k][u] is the state value of node u after k steps.
+ * Storing only 1D vectors consumes (17 * 16 * 2) = 544 bytes in .bss,
+ * eliminating the 8.8 KB stack allocation of 17 full TropMatrix structs.
+ */
+static int16_t D[MAX_DIM + 1][MAX_DIM];
+
+/* ========================================================================== */
+/*                           HELPER FUNCTIONS                                 */
+/* ========================================================================== */
+
+/**
+ * @brief Greatest Common Divisor (Euclidean algorithm) for fraction reduction.
+ */
+static int32_t calc_gcd(int32_t a, int32_t b)
 {
-    if ((A == 0) || (A->rows == 0) || (A->rows != A->cols)) {
-        return TROP_ZERO;
+    if (a < 0) {
+        a = -a;
+    }
+    if (b < 0) {
+        b = -b;
+    }
+    while (b != 0) {
+        int32_t t = b;
+        b = a % b;
+        a = t;
+    }
+    return (a == 0) ? 1 : a;
+}
+
+/* ========================================================================== */
+/*                         ALGORITHM IMPLEMENTATION                           */
+/* ========================================================================== */
+
+int8_t trop_karp_lambda(const TropMatrix *A, int32_t *lambda_num, int32_t *lambda_den)
+{
+    if ((A == 0) || (lambda_num == 0) || (lambda_den == 0)) {
+        return TROP_ERR_NULL_PTR;
+    }
+
+    if ((A->rows == 0) || (A->rows != A->cols) || (A->rows > MAX_DIM)) {
+        return TROP_ERR_INVALID_DIM;
     }
 
     const uint8_t n = A->rows;
 
     /*
-     * State trajectories: D[k] is the state vector (n x 1 matrix) after k events/steps.
-     * Memory consumption: 17 * sizeof(TropMatrix) on stack.
+     * Step 1: Initialize D_0 = [0, \varepsilon, \dots, \varepsilon]^T
+     * Node 0 is the designated source vertex. (Requires A to be irreducible).
      */
-    TropMatrix D[MAX_DIM + 1];
-
-    /* Step 1: Initialize D_0 = [0, TROP_ZERO, ..., TROP_ZERO]^T as an (n x 1) vector */
-    trop_matrix_init(&D[0], n, 1);
-    D[0].data[0][0] = TROP_ONE; /* 0 */
+    D[0][0] = TROP_ONE; /* 0 */
+    for (uint8_t u = 1; u < n; ++u) {
+        D[0][u] = TROP_ZERO;
+    }
 
     /*
-     * Step 2: Compute D_k = A (x) D_{k-1} using trop_matmul
-     * Since A is (n x n) and D_{k-1} is (n x 1), the product is (n x 1).
+     * Step 2: Compute D_k = A (x) D_{k-1} for k = 1 ... n
+     * Direct matrix-vector max-plus product avoids calling trop_matmul with
+     * large matrix wrappers on the stack.
      */
     for (uint8_t k = 1; k <= n; ++k) {
-        trop_matmul(A, &D[k - 1], &D[k]);
+        for (uint8_t i = 0; i < n; ++i) {
+            int16_t acc = TROP_ZERO;
+            for (uint8_t j = 0; j < n; ++j) {
+                int16_t term = trop_mul(A->data[i][j], D[k - 1][j]);
+                acc = trop_add(acc, term);
+            }
+            D[k][i] = acc;
+        }
     }
 
     /*
      * Step 3: Evaluate lambda = max_u min_{0 <= k <= n-1} (D_n(u) - D_k(u)) / (n - k)
      *
-     * We track best rational numbers using integer numerators and denominators
-     * to eliminate division rounding artifacts during comparison.
+     * Exact rational tracking: cross-multiplication avoids integer division rounding.
      */
     int32_t max_num = 0;
     int32_t max_den = 1;
     uint8_t has_valid_cycle = 0;
 
     for (uint8_t u = 0; u < n; ++u) {
-        /* Node must be reachable at step n */
-        if (D[n].data[u][0] <= TROP_ZERO) {
+        /* Node u must be reachable at step n */
+        if (D[n][u] <= TROP_ZERO) {
             continue;
         }
 
@@ -77,12 +132,12 @@ int16_t trop_karp_lambda(const TropMatrix *A)
         uint8_t has_valid_k = 0;
 
         for (uint8_t k = 0; k < n; ++k) {
-            /* Node must be reachable at step k */
-            if (D[k].data[u][0] <= TROP_ZERO) {
+            /* Node u must be reachable at step k */
+            if (D[k][u] <= TROP_ZERO) {
                 continue;
             }
 
-            int32_t diff = (int32_t)D[n].data[u][0] - (int32_t)D[k].data[u][0];
+            int32_t diff = (int32_t)D[n][u] - (int32_t)D[k][u];
             int32_t den  = (int32_t)n - (int32_t)k; /* Always > 0 since k < n */
 
             if (!has_valid_k) {
@@ -120,12 +175,19 @@ int16_t trop_karp_lambda(const TropMatrix *A)
     }
 
     if (!has_valid_cycle) {
-        return TROP_ZERO;
+        return TROP_ERR_NO_CYCLE;
     }
 
-    /*
-     * Integer evaluation of cycle time:
-     * Standard integer division (or rounded fixed-point).
-     */
-    return (int16_t)(max_num / max_den);
+    /* Standardize signs so denominator is strictly positive */
+    if (max_den < 0) {
+        max_num = -max_num;
+        max_den = -max_den;
+    }
+
+    /* Reduce fraction to lowest canonical terms */
+    int32_t g = calc_gcd(max_num, max_den);
+    *lambda_num = max_num / g;
+    *lambda_den = max_den / g;
+
+    return TROP_SUCCESS;
 }

@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -O2 -std=c99
+CFLAGS = -Wall -Wextra -Wpedantic -Werror -O2 -std=c99
 
 SRCS = tropical.c karp.c test_week1.c
 OBJS = $(SRCS:.c=.o)
