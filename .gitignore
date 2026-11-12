@@ -7,6 +7,8 @@
 *.bin
 *.hex
 *.d
+*.a
+*.s
 
 # Executables
 test_week1

@@ -83,6 +83,19 @@ make
 make test
 ```
 
+### ARM Cortex-M4 Cross-Compilation (Bare-Metal, Zero-Libc)
+Cross-compiles for ARM Cortex-M4 (e.g. STM32F407, ARMv7E-M with FPU) with `-ffreestanding -fno-builtin`, guaranteeing zero dynamic allocation, zero libc/runtime calls, and static `.bss` buffering:
+```bash
+# Build Cortex-M4 static library archive (libtropical.a, tropical_arm.o, karp_arm.o)
+make arm
+
+# Verify zero undefined libc symbols and exact .bss section allocations
+make check-arm
+
+# Generate assembly listings for inspection (tropical.s, karp.s)
+make asm
+```
+
 ### Keil MDK (Arm Compiler 6 / `armclang`)
 1. Add `tropical.c` and `karp.c` to your project source group.
 2. Add the repository directory to **Options for Target -> C/C++ (AC6) -> Include Paths**.

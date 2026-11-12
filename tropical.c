@@ -38,6 +38,23 @@ static TropMatrix s_kleene_accum;
 static TropMatrix s_kleene_power;
 static TropMatrix s_elim_A0_star;
 
+/**
+ * @brief Copy matrix contents using an explicit loop to prevent compiler-generated memcpy.
+ *
+ * @param[out] dst Destination matrix.
+ * @param[in]  src Source matrix.
+ */
+static void trop_matrix_copy(TropMatrix *dst, const TropMatrix *src)
+{
+    dst->rows = src->rows;
+    dst->cols = src->cols;
+    for (uint8_t i = 0; i < src->rows; ++i) {
+        for (uint8_t j = 0; j < src->cols; ++j) {
+            dst->data[i][j] = src->data[i][j];
+        }
+    }
+}
+
 /* ========================================================================== */
 /*                           SCALAR TROPICAL OPS                              */
 /* ========================================================================== */
@@ -151,7 +168,7 @@ int8_t trop_matrix_add(const TropMatrix *A, const TropMatrix *B, TropMatrix *C)
         }
     }
 
-    *C = s_add_tmp;
+    trop_matrix_copy(C, &s_add_tmp);
     return TROP_SUCCESS;
 }
 
@@ -186,7 +203,7 @@ int8_t trop_matmul(const TropMatrix *A, const TropMatrix *B, TropMatrix *C)
         }
     }
 
-    *C = s_matmul_tmp;
+    trop_matrix_copy(C, &s_matmul_tmp);
     return TROP_SUCCESS;
 }
 
@@ -208,7 +225,7 @@ int8_t trop_matpow(const TropMatrix *A, uint32_t power, TropMatrix *out)
     }
 
     /* Binary Exponentiation (O(n^3 * log2(power))) using static buffers */
-    s_matpow_base = *A;
+    trop_matrix_copy(&s_matpow_base, A);
     trop_matrix_identity(&s_matpow_result, n);
 
     uint32_t p = power;
@@ -222,7 +239,7 @@ int8_t trop_matpow(const TropMatrix *A, uint32_t power, TropMatrix *out)
         }
     }
 
-    *out = s_matpow_result;
+    trop_matrix_copy(out, &s_matpow_result);
     return TROP_SUCCESS;
 }
 
@@ -258,7 +275,7 @@ int8_t trop_kleene_star(const TropMatrix *A, TropMatrix *A_star)
      * (A^k)_{i,i} > 0. If detected, abort and return error.
      */
     trop_matrix_identity(&s_kleene_accum, n); /* A^0 = I */
-    s_kleene_power = *A;                      /* A^1 */
+    trop_matrix_copy(&s_kleene_power, A);     /* A^1 */
 
     /* Verify A^1 has no positive self-loops */
     for (uint8_t i = 0; i < n; ++i) {
@@ -287,7 +304,7 @@ int8_t trop_kleene_star(const TropMatrix *A, TropMatrix *A_star)
         }
     }
 
-    *A_star = s_kleene_accum;
+    trop_matrix_copy(A_star, &s_kleene_accum);
     return TROP_SUCCESS;
 }
 
